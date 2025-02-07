@@ -1,8 +1,71 @@
-"""
-WPS PIN generator and utilities
-"""
-from ..utils.network import NetworkAddress
-from .modern_vendors import ModernVendorPins
+class NetworkAddress:
+    """Handles MAC addresses"""
+
+    def __init__(self, mac):
+        if isinstance(mac, int):
+            self._INT_REPR = mac
+            self._STR_REPR = self._int2mac(mac)
+        elif isinstance(mac, str):
+            self._STR_REPR = mac.replace('-', ':').replace('.', ':').upper()
+            self._INT_REPR = self._mac2int(mac)
+
+    @staticmethod
+    def _mac2int(mac) -> int:
+        """Converts MAC address to integer"""
+        return int(mac.replace(':', ''), 16)
+
+    @staticmethod
+    def _int2mac(mac) -> str:
+        """Converts integer to MAC address"""
+        mac = hex(mac).split('x')[-1].upper()
+        mac = mac.zfill(12)
+        mac = ':'.join(mac[i: i + 2] for i in range(0, 12, 2))
+        return mac
+
+    @property
+    def STRING(self):
+        return self._STR_REPR
+
+    @STRING.setter
+    def STRING(self, value):
+        self._STR_REPR = value
+        self._INT_REPR = self._mac2int(value)
+
+    @property
+    def INTEGER(self):
+        return self._INT_REPR
+
+    @INTEGER.setter
+    def INTEGER(self, value):
+        self._INT_REPR = value
+        self._STR_REPR = self._int2mac(value)
+
+    def __int__(self):
+        return self.INTEGER
+
+    def __str__(self):
+        return self.STRING
+
+    def __iadd__(self, other):
+        self.INTEGER += other
+
+    def __isub__(self, other):
+        self.INTEGER -= other
+
+    def __eq__(self, other):
+        return self.INTEGER == other.INTEGER
+
+    def __ne__(self, other):
+        return self.INTEGER != other.INTEGER
+
+    def __lt__(self, other):
+        return self.INTEGER < other.INTEGER
+
+    def __gt__(self, other):
+        return self.INTEGER > other.INTEGER
+
+    def __repr__(self):
+        return f'NetworkAddress(string={self._STR_REPR}, integer={self._INT_REPR})'
 
 class WPSpin:
     """WPS pin generator."""
@@ -11,7 +74,11 @@ class WPSpin:
         self.ALGO_MAC = 0
         self.ALGO_EMPTY = 1
         self.ALGO_STATIC = 2
-
+        
+        # Import router profiles
+        from . import router_profiles
+        self.ROUTER_PROFILES = router_profiles
+        
         self.ALGOS = {
             'pin24': {'name': '24-bit PIN', 'mode': self.ALGO_MAC, 'gen': self._pin24},
             'pin28': {'name': '28-bit PIN', 'mode': self.ALGO_MAC, 'gen': self._pin28},
@@ -20,14 +87,7 @@ class WPSpin:
             'pinDLink1': {'name': 'D-Link PIN +1', 'mode': self.ALGO_MAC, 'gen': self._pinDLink1},
             'pinASUS': {'name': 'ASUS PIN', 'mode': self.ALGO_MAC, 'gen': self._pinASUS},
             'pinAirocon': {'name': 'Airocon Realtek', 'mode': self.ALGO_MAC, 'gen': self._pinAirocon},
-            
-            'pinTPLink2023': {'name': 'TP-Link 2023+', 'mode': self.ALGO_MAC, 'gen': ModernVendorPins.tp_link_2023},
-            'pinXiaomiAIoT': {'name': 'Xiaomi AIoT', 'mode': self.ALGO_MAC, 'gen': ModernVendorPins.xiaomi_aiot},
-            'pinASUSAX': {'name': 'ASUS AX 2023+', 'mode': self.ALGO_MAC, 'gen': ModernVendorPins.asus_ax},
-            'pinNetgearNX': {'name': 'Netgear Nighthawk 2023+', 'mode': self.ALGO_MAC, 'gen': ModernVendorPins.netgear_nx},
-            'pinHuaweiAX': {'name': 'Huawei AX Series', 'mode': self.ALGO_MAC, 'gen': ModernVendorPins.huawei_ax},
-            'pinMercusys': {'name': 'Mercusys 2023+', 'mode': self.ALGO_MAC, 'gen': ModernVendorPins.mercusys_2023},
-            
+            # Static pin algos
             'pinEmpty': {'name': 'Empty PIN', 'mode': self.ALGO_EMPTY, 'gen': lambda mac: ''},
             'pinCisco': {'name': 'Cisco', 'mode': self.ALGO_STATIC, 'gen': lambda mac: 1234567},
             'pinBrcm1': {'name': 'Broadcom 1', 'mode': self.ALGO_STATIC, 'gen': lambda mac: 2017252},
@@ -90,14 +150,29 @@ class WPSpin:
 
         return pin
 
-    def getLikely(self, bssid: str) -> list | None:
-        """Returns a likely pin."""
-
-        res = self._getSuggestedList(bssid)
-        if res:
-            return res[0]
-
-        return None
+    def getLikely(self, bssid: str, essid: str = None) -> str:
+        """Returns the most likely PIN based on router profile and characteristics."""
+        manufacturer, model, version = self._detect_manufacturer(bssid)
+        
+        # Get recommended algorithms from router profile
+        if manufacturer:
+            algorithms = self.ROUTER_PROFILES.get_pin_algorithms(manufacturer, model)
+            if algorithms:
+                # Try each recommended algorithm
+                for algo in algorithms:
+                    if algo in self.ALGOS:
+                        pin = self._generate(algo, bssid)
+                        if pin:
+                            return pin
+        
+        # Fallback to default algorithm suggestions
+        suggested = self._getSuggestedList(bssid)
+        if suggested:
+            return suggested[0]
+        
+        # Last resort - try common static PINs
+        common_pins = ['12345670', '00000000', '11111111']
+        return common_pins[0]
 
     @staticmethod
     def checksum(pin: int) -> int:
@@ -146,13 +221,7 @@ class WPSpin:
             'pinThomson': ('002624', '4432C8', '88F7C7', 'CC03FA'),
             'pinHG532x': ('00664B', '086361', '087A4C', '0C96BF', '14B968', '2008ED', '2469A5', '346BD3', '786A89', '88E3AB', '9CC172', 'ACE215', 'D07AB5', 'CCA223', 'E8CD2D', 'F80113', 'F83DFF'),
             'pinH108L': ('4C09B4', '4CAC0A', '84742A4', '9CD24B', 'B075D5', 'C864C7', 'DC028E', 'FCC897'),
-            'pinONO': ('5C353B', 'DC537C'),
-            'pinTPLink2023': ('54AF97', '001D0F', '0C4B54', '64566B', '84162B', '94A7B7', 'EC086B'),  # TP-Link 2023+ models
-            'pinXiaomiAIoT': ('0C1D12', '7C0BC6', '8C8E9B', '9C9D7E'),  # Xiaomi AIoT routers
-            'pinASUSAX': ('04D9F5', '10BF48', '14DDA9', '382C4A', '40167E'),  # ASUS 2023+ AX series
-            'pinNetgearNX': ('84D469', 'A42B8C', 'C40415'),  # Netgear Nighthawk 2023+
-            'pinHuaweiAX': ('00E0FC', '24DF6A', '48D539', '80B686', '9C52F8'),  # Huawei AX series
-            'pinMercusys': ('D4CA6E', 'D4CA6D', 'D4CA6F', 'CC32E5'),  # Mercusys 2023+ models
+            'pinONO': ('5C353B', 'DC537C')
         }
         res = []
         for algo_id, masks in algorithms.items():
@@ -260,3 +329,33 @@ class WPSpin:
             res.append(self._generate(algo, bssid))
 
         return res
+
+    def _detect_manufacturer(self, bssid: str) -> tuple:
+        """Detect router manufacturer and model from BSSID."""
+        mac_prefix = bssid[:8].upper()
+        
+        manufacturer_prefixes = {
+            'TP-LINK': ['TP-LINK_', 'TL-', 'TP-'],
+            'D-LINK': ['D-LINK_', 'DL-', 'DIR-'],
+            'ASUS': ['ASUS_', 'RT-'],
+            'NETGEAR': ['NETGEAR_', 'WNR', 'WGR']
+        }
+        
+        for manufacturer, prefixes in manufacturer_prefixes.items():
+            if any(mac_prefix.startswith(prefix) for prefix in prefixes):
+                # Try to extract model from BSSID format
+                model = None
+                version = None
+                
+                # Add model detection logic here based on common formats
+                # Example: TP-LINK_WR841N_V13
+                if '_' in bssid:
+                    parts = bssid.split('_')
+                    if len(parts) > 1:
+                        model = parts[1]
+                        if len(parts) > 2 and parts[2].startswith('V'):
+                            version = parts[2][1:]
+                
+                return manufacturer, model, version
+        
+        return None, None, None

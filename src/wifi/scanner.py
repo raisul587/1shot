@@ -16,7 +16,7 @@ class WiFiScanner:
         self.INTERFACE = interface
         self.VULN_LIST = vuln_list
 
-        reports_fname = os.path.join(REPORTS_DIR, 'stored.csv')
+        reports_fname = REPORTS_DIR + 'stored.csv'
 
         try:
             # Look for already stored networks to highlight
