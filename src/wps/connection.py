@@ -725,4 +725,7 @@ class Initialize:
         os.remove(self.TEMPCONF)
 
     def __del__(self):
-        self._cleanup()
+        try:
+            self._cleanup()
+        except Exception:
+            pass
